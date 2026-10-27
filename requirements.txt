@@ -1,0 +1,2 @@
+# 核心引擎与测试：仅 Python 标准库。
+# 训练链路（可选）：pip install -e ".[train]"  或  pip install numpy torch

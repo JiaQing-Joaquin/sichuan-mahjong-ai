@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Local data / checkpoints (regenerable)
+data/
+checkpoints/
+*.npz
+*.pt
+
+# Logs
+*.log
+
+# Temp helper scripts created during development
+_*.bat
+_*.cmd
+run_eval.bat
+
+# OS
+Thumbs.db
+.DS_Store
