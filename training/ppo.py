@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "training"))
 
 from model import PolicyValueNet  # noqa: E402
+from experiment import git_state, sha256_file  # noqa: E402
 from policy_ai import ModelAI  # noqa: E402
 from sichuan_mahjong.baseline import BaselineAI  # noqa: E402
 from sichuan_mahjong.encoder import CALL_KINDS, encode  # noqa: E402
@@ -255,6 +256,13 @@ def main() -> None:
         help="comma-separated checkpoints to use as extra opponents",
     )
     args = parser.parse_args()
+    if min(args.iters, args.games, args.epochs, args.batch) <= 0:
+        parser.error("--iters, --games, --epochs and --batch must be positive")
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     ckpt = torch.load(args.init, map_location=args.device)
     model = PolicyValueNet(
@@ -266,17 +274,26 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    league_paths = [p.strip() for p in args.league.split(",") if p.strip()]
     opponents = [BaselineAI(args.seed)]
-    for path in [p.strip() for p in args.league.split(",") if p.strip()]:
+    for path in league_paths:
         opponents.append(ModelAI(path, device=args.device))
     print(f"opponents: {len(opponents)} (1 rule AI + {len(opponents) - 1} league)")
 
     started = time.perf_counter()
+    iteration_history = []
     for it in range(1, args.iters + 1):
         data, rollout_stats = collect_rollouts(
             model, args.device, args.games, args.seed + it * 1000, opponents=opponents
         )
         update_stats = ppo_update(model, optimizer, data, args)
+        iteration_history.append({
+            "iteration": it,
+            "transitions": len(data),
+            "rollout_score_per_seat": rollout_stats["score_per_seat"],
+            "rollout_hu": rollout_stats["hu"],
+            **update_stats,
+        })
         print(
             f"iter {it:>2}  transitions {len(data):>5}  "
             f"rollout score/seat {rollout_stats['score_per_seat']:+.2f}  "
@@ -287,6 +304,7 @@ def main() -> None:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    git_commit, git_dirty = git_state(ROOT)
     torch.save(
         {
             "model": model.state_dict(),
@@ -295,6 +313,28 @@ def main() -> None:
             "call_dim": ckpt["call_dim"],
             "hidden": ckpt["hidden"],
             "score_scale": 50.0,
+            "training_meta": {
+                "algorithm": "ppo",
+                "seed": args.seed,
+                "iters": args.iters,
+                "games_per_iter": args.games,
+                "epochs": args.epochs,
+                "batch": args.batch,
+                "lr": args.lr,
+                "clip": args.clip,
+                "value_coef": args.value_coef,
+                "entropy_coef": args.entropy_coef,
+                "init": {"path": str(Path(args.init).resolve()),
+                         "sha256": sha256_file(args.init)},
+                "league": [
+                    {"path": str(Path(path).resolve()), "sha256": sha256_file(path)}
+                    for path in league_paths
+                ],
+                "iterations": iteration_history,
+                "git_commit": git_commit,
+                "git_dirty": git_dirty,
+                "torch_version": torch.__version__,
+            },
         },
         out_path,
     )
