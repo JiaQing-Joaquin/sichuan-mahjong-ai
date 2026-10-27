@@ -8,6 +8,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "training"))
 
 from model import PolicyValueNet  # noqa: E402
+from experiment import git_state, sha256_file  # noqa: E402
 
 
 def load_datasets(paths: list[str]) -> dict:
@@ -64,14 +66,27 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     args = parser.parse_args()
+    if args.epochs <= 0 or args.batch <= 0:
+        parser.error("--epochs and --batch must be positive")
 
-    raw = load_datasets([p.strip() for p in args.data.split(",") if p.strip()])
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    data_paths = [p.strip() for p in args.data.split(",") if p.strip()]
+    if not data_paths:
+        parser.error("--data must contain at least one dataset")
+    raw = load_datasets(data_paths)
     state_dim = raw["X"].shape[1]
     discard_dim = raw["D"].shape[1]
     call_dim = raw["C"].shape[1]
     print(f"datasets: {len(args.data.split(','))}  samples: {len(raw['Y'])}")
 
     tr_idx, va_idx = split_by_game(raw["G"], args.val_frac, args.seed)
+    if not len(tr_idx) or not len(va_idx):
+        parser.error("dataset needs at least two games for a nonempty train/validation split")
 
     def make_loader(idx, shuffle):
         ds = TensorDataset(
@@ -147,6 +162,7 @@ def main() -> None:
     print(f"train samples: {len(tr_idx)}  val samples: {len(va_idx)}")
     best_val = float("inf")
     best_state = None
+    best_epoch = None
     started = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
@@ -160,6 +176,7 @@ def main() -> None:
         )
         if va["loss"] < best_val:
             best_val = va["loss"]
+            best_epoch = epoch
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
     if best_state is not None:
@@ -167,6 +184,7 @@ def main() -> None:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    git_commit, git_dirty = git_state(ROOT)
     torch.save(
         {
             "model": model.state_dict(),
@@ -175,6 +193,26 @@ def main() -> None:
             "call_dim": call_dim,
             "hidden": args.hidden,
             "score_scale": 50.0,
+            "training_meta": {
+                "algorithm": "behavior_cloning",
+                "seed": args.seed,
+                "epochs": args.epochs,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_val,
+                "batch": args.batch,
+                "lr": args.lr,
+                "value_coef": args.value_coef,
+                "val_frac": args.val_frac,
+                "train_samples": len(tr_idx),
+                "val_samples": len(va_idx),
+                "datasets": [
+                    {"path": str(Path(path).resolve()), "sha256": sha256_file(path)}
+                    for path in data_paths
+                ],
+                "git_commit": git_commit,
+                "git_dirty": git_dirty,
+                "torch_version": torch.__version__,
+            },
         },
         out_path,
     )
